@@ -5,7 +5,6 @@ import android.annotation.TargetApi;
 import android.app.DownloadManager;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ActivityInfo;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
@@ -13,6 +12,7 @@ import android.os.Build;
 import android.os.Environment;
 import android.support.annotation.RequiresApi;
 import android.text.TextUtils;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -27,6 +27,7 @@ import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -58,10 +59,12 @@ import com.reactnativecommunity.webview.events.TopLoadingProgressEvent;
 import com.reactnativecommunity.webview.events.TopLoadingStartEvent;
 import com.reactnativecommunity.webview.events.TopMessageEvent;
 import com.reactnativecommunity.webview.events.TopShouldStartLoadWithRequestEvent;
+import com.reactnativecommunity.webview.SSLPinningWebView;
 
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.InputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -71,6 +74,8 @@ import java.util.Locale;
 import java.util.Map;
 
 import javax.annotation.Nullable;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
 
 /**
  * Manages instances of {@link WebView}
@@ -119,11 +124,24 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
   protected RNCWebChromeClient mWebChromeClient = null;
   protected boolean mAllowsFullscreenVideo = false;
 
+  private static SSLContext sslContext;
+
   public RNCWebViewManager() {
+    prepareSslPinning();
     mWebViewConfig = new WebViewConfig() {
       public void configWebView(WebView webView) {
       }
     };
+  }
+
+  private void prepareSslPinning() {
+    try{
+      KeyPinStore keystore = KeyPinStore.getInstance();
+      sslContext = keystore.getContext();
+    }catch (Exception ex){
+      Log.e("prepareSslPinning", ex.getMessage());
+    }
+
   }
 
   public RNCWebViewManager(WebViewConfig webViewConfig) {
@@ -534,7 +552,6 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
 
   protected void setupWebChromeClient(ReactContext reactContext, WebView webView) {
     if (mAllowsFullscreenVideo) {
-      int initialRequestedOrientation = reactContext.getCurrentActivity().getRequestedOrientation();
       mWebChromeClient = new RNCWebChromeClient(reactContext, webView) {
         @Override
         public void onShowCustomView(View view, CustomViewCallback callback) {
@@ -546,7 +563,6 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
           mVideoView = view;
           mCustomViewCallback = callback;
 
-          mReactContext.getCurrentActivity().setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
           if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
             mVideoView.setSystemUiVisibility(FULLSCREEN_SYSTEM_UI_VISIBILITY);
             mReactContext.getCurrentActivity().getWindow().setFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
@@ -577,7 +593,6 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
           if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
             mReactContext.getCurrentActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
           }
-          mReactContext.getCurrentActivity().setRequestedOrientation(initialRequestedOrientation);
 
           mReactContext.removeLifecycleEventListener(this);
         }
@@ -593,6 +608,57 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
   }
 
   protected static class RNCWebViewClient extends WebViewClient {
+    @Override
+    @TargetApi(11)
+    public WebResourceResponse shouldInterceptRequest (final WebView view, String url) {
+      return processRequest(Uri.parse(url));
+    }
+
+    @Override
+    @TargetApi(21)
+    public WebResourceResponse shouldInterceptRequest (final WebView view, WebResourceRequest interceptedRequest) {
+      return processRequest(interceptedRequest.getUrl());
+    }
+
+    private WebResourceResponse processRequest(Uri uri) {
+      Log.d("SSL_PINNING_WEBVIEWS", "GET: " + uri.toString());
+
+      try {
+        // Setup connection
+        URL url = new URL(uri.toString());
+        HttpsURLConnection urlConnection = (HttpsURLConnection) url.openConnection();
+
+        // Set SSL Socket Factory for this request
+        urlConnection.setSSLSocketFactory(sslContext.getSocketFactory());
+
+        // Get content, contentType and encoding
+        InputStream is = urlConnection.getInputStream();
+        String contentType = urlConnection.getContentType();
+        String encoding = urlConnection.getContentEncoding();
+
+        // If got a contentType header
+        if(contentType != null) {
+
+          String mimeType = contentType;
+
+          // Parse mime type from contenttype string
+          if (contentType.contains(";")) {
+            mimeType = contentType.split(";")[0].trim();
+          }
+
+          Log.d("SSL_PINNING_WEBVIEWS", "Mime: " + mimeType);
+
+          // Return the response
+          return new WebResourceResponse(mimeType, encoding, is);
+        }
+
+      } catch (Exception e) {
+        Log.e("processRequest", e.getLocalizedMessage());
+      }
+
+      // Return empty response for this request
+      return new WebResourceResponse(null, null, null);
+    }
 
     protected boolean mLastLoadFailed = false;
     protected @Nullable
@@ -786,7 +852,7 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
    * Subclass of {@link WebView} that implements {@link LifecycleEventListener} interface in order
    * to call {@link WebView#destroy} on activity destroy event and also to clear the client
    */
-  protected static class RNCWebView extends WebView implements LifecycleEventListener {
+  protected static class RNCWebView extends SSLPinningWebView implements LifecycleEventListener {
     protected @Nullable
     String injectedJS;
     protected boolean messagingEnabled = false;
